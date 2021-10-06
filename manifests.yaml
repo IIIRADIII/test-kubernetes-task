@@ -1,0 +1,76 @@
+# Не делаю ничего конкретного в контексте мультизональности, т.к. подразумеваю, что в мультизональном кубере контроллер сам распределяет поды по нодам с учетом метки нод topology.kubernetes.io/zone.
+# Я бы еще увеличил SelectorSpreadPriority для скедьюлера, поскольку скедьюлер учитывает множество факторов, самыми приоритетными из которых являются наличие ресурсов и загруженность ноды, существует шанс, что поды распределятся неравномерно по зонам, поэтому желательно увеличить приоритет зон при скедьюлинге
+# Также подразумеваю, что есть готовый Load Balancer либо же Ingress Controller, умеющий в автоматический сервис дискавери
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  # 4 реплики для удовлетворения требований по пиковой нагрузке
+  replicas: 4
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    # Добавляем стратегию RollingUpdate для обновления приложения без простоя
+    updateStrategy:
+      type: RollingUpdate
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.14.2
+        ports:
+        - containerPort: 80
+      # Лимичу 128Mb и 0.1 CPU в requests, немного с запасом по памяти 256Mb и т.к. непонятно из ТЗ сколько приложение ест в пике при инициализации проставил 1 CPU, чтобы хоть как-то залимитить
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "100m"
+        limits:
+          memory: "256Mi"
+          cpu: "1000m"
+      # Использую TCP пробы для упрощения
+      # Задержка выполнения проб, т.к. по ТЗ приложению нужно до 10 секунд для инициализации, сделал чуть больше, т.к. на 10 секнудах может периодически стрелять
+      readinessProbe:
+        tcpSocket:
+          port: 80
+        initialDelaySeconds: 12
+        periodSeconds: 10
+      livenessProbe:
+        tcpSocket:
+          port: 80
+        initialDelaySeconds: 12
+        periodSeconds: 20
+---
+# Сервис для доступа к контейнерам
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+  selector:
+    name: nginx
+---
+# HorizontalPodAutoscaler для того, чтобы оптимизировать кол-во под в соответствии с нагрузкой днем и ночью
+# Будет срабатывать автоскейлинг при потреблении более чем 0.05 CPU, подразумевая, что у нас под в рабочей нагрузке потребляет 0.1 CPU и запуская доп. поду заранее.
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 50
